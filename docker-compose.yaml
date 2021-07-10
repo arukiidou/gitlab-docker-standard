@@ -1,0 +1,119 @@
+#docker-composeのバージョン
+#https://matsuand.github.io/docs.docker.jp.onthefly/compose/compose-file/
+version: '3.8'
+services:
+  gitlab:
+    #インストール時点の最新版にすることを推奨
+    image: "gitlab/gitlab-ce:${GITLAB_TAG_VERSION:-14.0.0-ce.0}"
+    container_name: gitlab
+    restart: always
+    environment:
+      GITLAB_OMNIBUS_CONFIG: |
+        #公式ドキュメントを参照してください
+        # https://docs.gitlab.com/omnibus/docker/README.html
+        # https://docs.gitlab.com/omnibus/docker/README.html#install-gitlab-using-docker-compose
+        # https://docs.gitlab.com/omnibus/docker/README.html#pre-configure-docker-container
+        # = をつけてはいけない。正しいhostが参照できない場合がある
+        external_url 'http://${GITLAB_HOST?err}:18080'
+        gitlab_rails['gitlab_host'] = 'http://${GITLAB_HOST?err}:18080'
+        gitlab_rails['gitlab_shell_ssh_port'] = 10022
+        #タイムゾーン設定
+        gitlab_rails['time_zone'] = 'Asia/Tokyo'
+        nginx['listen_addresses'] = ['0.0.0.0', '[::]']
+        #Kubernetesとの競合を回避する
+        #https://gitlab.com/gitlab-org/gitlab-foss/-/issues/35300
+        prometheus['monitor_kubernetes'] = false
+        #ChromeでsecureでないcookieがブロックされることによるInvalidAuthenticityToken(status code 422)対策。
+        #https://gitlab.com/gitlab-org/gitlab-foss/-/issues/50393
+        nginx['proxy_set_headers'] = {
+          "X-Forwarded-Proto" => "http"
+        }
+        nginx['redirect_http_to_https'] = false
+        nginx['redirect_http_to_https_port'] = 18080
+        nginx['real_ip_trusted_addresses'] = ['${GITLAB_HOST?err}','127.0.0.1']
+        # 以降、カスタマイズ
+        # https://github.com/gitlabhq/omnibus-gitlab/blob/master/files/gitlab-config-template/gitlab.rb.template
+        # [OPTION]Maven(Gradle)パッケージレジストリの有効化により、ライブラリ(mavenなど)をプライベート環境で共有できる
+        gitlab_rails['packages_enabled'] = true
+        gitlab_rails['packages_storage_path'] = "/var/opt/gitlab/gitlab-rails/shared/packages"
+        # [OPTION]grafana監視を使用
+        grafana['disable_login_form'] = false
+        grafana['allow_user_sign_up'] = true
+        grafana['admin_password'] = 'grafana'
+        grafana['metrics_enabled'] = true
+        grafana['metrics_basic_auth_username'] = 'grafana_metrics'
+        grafana['metrics_basic_auth_password'] = 'grafana'
+        prometheus['scrape_configs'] = [
+          {
+          'job_name': 'example',
+          'static_configs' => [ 'targets' => ['${GITLAB_HOST?err}:9252'], ],
+          },
+        ]
+        #[OPTION]pages機能を有効化することで、ブラウザでhtmlレポートが読めるようになる
+        pages_external_url 'http://${GITLAB_HOST?err}:18080'
+        gitlab_pages['enable'] = true
+        gitlab_pages['dir'] = "/var/opt/gitlab/gitlab-pages"
+        gitlab_pages['log_directory'] = "/var/log/gitlab/gitlab-pages"
+        gitlab_pages['access_control'] = true
+        gitlab_pages['inplace_chroot'] = true
+        #[OPTION]gitlab container registryを有効化することで、コンテナをローカルに保有できる
+        registry['enable'] = true
+        registry_external_url 'http://${GITLAB_HOST?err}:5050'
+        gitlab_rails['registry_host'] = '${GITLAB_HOST?err}'
+        gitlab_rails['registry_port'] = "5050"
+        registry['env'] = {
+          "REGISTRY_HTTP_RELATIVEURLS" => true
+        }
+        #[OPTION]dockerhubから頻繁にコンテナを取得する時のpull回数制限を回避できる
+        #また、dockerhubが通信障害になっていてもコンテナを引き続き利用可能になる
+        gitlab_rails['dependency_proxy_enabled'] = true
+    ports:
+      - '18080:18080'
+      - '443:443'
+      - '10022:22'
+      - '5050:5050'
+    volumes:
+      - type: volume
+        source: gitlab-config
+        target: /etc/gitlab
+        volume:
+          nocopy: true
+      - type: volume
+        source: gitlab-log
+        target: /var/log/gitlab
+        volume:
+          nocopy: true
+      - type: volume
+        source: gitlab-data
+        target: /var/opt/gitlab
+        volume:
+          nocopy: true
+    networks:
+      - gitlab-network
+  runner:
+    build:
+      context: .
+      dockerfile: gitlab-runner.Dockerfile
+      args:
+        IMAGE_VERSION: ubuntu-v${RUNNER_TAG_VERSION:-14.0.0}
+        PROXY_URL: ${PROXY_URL}
+    image: koyama/jdk-runner:ubuntu-v${RUNNER_TAG_VERSION:-14.0.0}
+    container_name: gitlab-runner
+    restart: always
+    ports:
+      #9252=Prometheus
+      - '9252:9252'
+    volumes:
+      - gitlab-runner-config:/etc/gitlab-runner
+      - gitlab-runner-home:/home/gitlab-runner
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - gitlab-network
+volumes:
+  gitlab-config:
+  gitlab-log:
+  gitlab-data:
+  gitlab-runner-config:
+  gitlab-runner-home:
+networks:
+  gitlab-network:
